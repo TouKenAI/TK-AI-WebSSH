@@ -17,6 +17,7 @@ import time
 def register_ai_routes(app):
     """Register AI API routes on the Flask app."""
 
+    # Exempt AI API endpoints from CSRF (they use their own auth via login_required)
     @app.route('/api/ai/chat', methods=['POST'])
     @login_required
     def ai_chat():

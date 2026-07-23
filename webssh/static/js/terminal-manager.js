@@ -1,0 +1,469 @@
+const TerminalManager = {
+    terminals: {},
+    fitAddons: {},
+    searchAddons: {},
+    terminalReady: {},
+    pendingOutput: {},
+    sessionTerminals: {},
+    transcripts: {},
+    transcriptSizes: {},
+    maxTranscriptSize: 200000,
+
+    getCssVar(name, fallback = '') {
+        return getComputedStyle(document.body).getPropertyValue(name).trim() || fallback;
+    },
+
+    buildTheme() {
+        return {
+            background: this.getCssVar('--term-background', '#1c2128'),
+            foreground: this.getCssVar('--term-foreground', '#e6edf3'),
+            cursor: this.getCssVar('--accent-primary', '#58a6ff'),
+            cursorAccent: this.getCssVar('--term-background', '#1c2128'),
+            selectionBackground: this.getCssVar('--accent-primary-glow', 'rgba(88, 166, 255, 0.4)'),
+            black: this.getCssVar('--term-black', '#484848'),
+            red: this.getCssVar('--term-red', '#ff6b6b'),
+            green: this.getCssVar('--term-green', '#4ec97a'),
+            yellow: this.getCssVar('--term-yellow', '#e5c07b'),
+            blue: this.getCssVar('--term-blue', '#61afef'),
+            magenta: this.getCssVar('--term-magenta', '#c678dd'),
+            cyan: this.getCssVar('--term-cyan', '#56b6c2'),
+            white: this.getCssVar('--term-white', '#dcdfe4'),
+            brightBlack: this.getCssVar('--term-bright-black', '#636363'),
+            brightRed: this.getCssVar('--term-bright-red', '#ff8787'),
+            brightGreen: this.getCssVar('--term-bright-green', '#7ee0a0'),
+            brightYellow: this.getCssVar('--term-bright-yellow', '#ffd68a'),
+            brightBlue: this.getCssVar('--term-bright-blue', '#82c8f5'),
+            brightMagenta: this.getCssVar('--term-bright-magenta', '#d9a0e8'),
+            brightCyan: this.getCssVar('--term-bright-cyan', '#7ccbd4'),
+            brightWhite: this.getCssVar('--term-bright-white', '#ffffff')
+        };
+    },
+
+    getMonoFont() {
+        return this.getCssVar('--font-mono', 'monospace');
+    },
+
+    getResponsiveFontSize() {
+        const width = window.innerWidth;
+        if (width < 480) return 12;
+        if (width < 768) return 13;
+        return 14;
+    },
+
+    isMobile() {
+        return window.innerWidth < 768 || 'ontouchstart' in window;
+    },
+
+    createTerminal(sessionId, terminalKey = null) {
+        const key = terminalKey || sessionId;
+        const monoFont = this.getMonoFont();
+        const theme = this.buildTheme();
+        const terminal = new Terminal({
+            cursorBlink: true,
+            fontSize: this.getResponsiveFontSize(),
+            fontFamily: monoFont || 'monospace',
+            theme: theme,
+            scrollback: 50000,
+            scrollOnOutput: true,
+            scrollOnUserInput: true,
+            tabStopWidth: 4,
+            allowProposedApi: true
+        });
+
+        const fitAddon = new FitAddon.FitAddon();
+        terminal.loadAddon(fitAddon);
+
+        let searchAddon = null;
+        if (typeof SearchAddon !== 'undefined') {
+            searchAddon = new SearchAddon.SearchAddon();
+            terminal.loadAddon(searchAddon);
+        }
+
+        this.terminals[key] = terminal;
+        this.fitAddons[key] = fitAddon;
+        this.searchAddons[key] = searchAddon;
+
+        if (!this.sessionTerminals[sessionId]) {
+            this.sessionTerminals[sessionId] = [];
+        }
+        if (!this.sessionTerminals[sessionId].includes(key)) {
+            this.sessionTerminals[sessionId].push(key);
+        }
+
+        return terminal;
+    },
+
+    attachTerminal(sessionId, containerId, terminalKey = null) {
+        const key = terminalKey || sessionId;
+        const terminal = this.terminals[key];
+        if (!terminal) {
+            console.error('Terminal not found:', sessionId);
+            return false;
+        }
+
+        const container = document.getElementById(containerId);
+        if (!container) {
+            console.error('Container not found:', containerId);
+            return false;
+        }
+
+        this.pendingOutput[key] = [];
+        this.terminalReady[key] = false;
+        if (!this.transcripts[sessionId]) {
+            this.transcripts[sessionId] = [];
+            this.transcriptSizes[sessionId] = 0;
+        }
+
+        terminal.open(container);
+
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                this.fitTerminal(sessionId);
+
+                setTimeout(() => {
+                    terminal.clear();
+
+                    this.terminalReady[key] = true;
+
+                    if (this.pendingOutput[key] && this.pendingOutput[key].length > 0) {
+                        console.log(`Flushing ${this.pendingOutput[key].length} pending outputs for ${sessionId}`);
+                        this.pendingOutput[key].forEach(data => {
+                            this.writeToTerminalWithScroll(terminal, data);
+                        });
+                        this.pendingOutput[key] = [];
+                    }
+                }, 50);
+            });
+        });
+
+        return true;
+    },
+
+    writeOutput(sessionId, data) {
+        const terminalKeys = this.sessionTerminals[sessionId] || [];
+        this.appendTranscript(sessionId, data);
+        if (terminalKeys.length === 0) {
+            console.error('Terminal not found for writeOutput:', sessionId);
+            return;
+        }
+
+        terminalKeys.forEach(key => {
+            this.writeOutputToTerminal(key, data, sessionId);
+        });
+    },
+
+    writeOutputToTerminal(terminalKey, data, sessionId) {
+        const terminal = this.terminals[terminalKey];
+        if (!terminal) {
+            return;
+        }
+
+        if (this.terminalReady[terminalKey]) {
+            this.writeToTerminalWithScroll(terminal, data);
+        } else {
+            if (!this.pendingOutput[terminalKey]) {
+                this.pendingOutput[terminalKey] = [];
+            }
+            this.pendingOutput[terminalKey].push(data);
+            console.log(`Buffering output for ${sessionId} (terminal not ready yet)`);
+        }
+    },
+
+    isTerminalAtBottom(terminal) {
+        const buffer = terminal.buffer?.active;
+        if (!buffer) {
+            return true;
+        }
+        return buffer.viewportY >= buffer.baseY;
+    },
+
+    writeToTerminalWithScroll(terminal, data) {
+        const shouldScroll = this.isTerminalAtBottom(terminal);
+        terminal.write(data, () => {
+            if (shouldScroll) {
+                terminal.scrollToBottom();
+            }
+        });
+    },
+
+    appendTranscript(sessionId, data) {
+        if (!this.transcripts[sessionId]) {
+            this.transcripts[sessionId] = [];
+            this.transcriptSizes[sessionId] = 0;
+        }
+
+        this.transcripts[sessionId].push(data);
+        this.transcriptSizes[sessionId] += data.length;
+
+        while (this.transcriptSizes[sessionId] > this.maxTranscriptSize && this.transcripts[sessionId].length > 0) {
+            const removed = this.transcripts[sessionId].shift();
+            this.transcriptSizes[sessionId] -= removed.length;
+        }
+    },
+
+    getTranscript(sessionId) {
+        if (!this.transcripts[sessionId]) {
+            return '';
+        }
+        return this.transcripts[sessionId].join('');
+    },
+
+    getCleanTranscript(sessionId) {
+        const raw = this.getTranscript(sessionId);
+        if (!raw) {
+            return '';
+        }
+        const stripped = this.stripAnsiSequences(raw);
+        return this.normalizeControlChars(stripped);
+    },
+
+    stripAnsiSequences(text) {
+        return text
+            .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
+            .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+            .replace(/\x1b[()][0-2]?/g, '')
+            .replace(/\x1b[>=]/g, '')
+            .replace(/\x1b[0-9A-Za-z]/g, '')
+            .replace(/\x07/g, '');
+    },
+
+    normalizeControlChars(text) {
+        const output = [];
+        let lineStart = 0;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (ch === '\n') {
+                output.push('\n');
+                lineStart = output.length;
+                continue;
+            }
+            if (ch === '\r') {
+                output.splice(lineStart);
+                continue;
+            }
+            if (ch === '\b') {
+                if (output.length > lineStart) {
+                    output.pop();
+                }
+                continue;
+            }
+            if (ch === '\t') {
+                output.push('\t');
+                continue;
+            }
+            if (ch < ' ') {
+                continue;
+            }
+            output.push(ch);
+        }
+        return output.join('');
+    },
+
+    fitTerminal(sessionId) {
+        const terminalKeys = this.sessionTerminals[sessionId] || [];
+        terminalKeys.forEach(key => {
+            const fitAddon = this.fitAddons[key];
+            if (fitAddon) {
+                try {
+                    fitAddon.fit();
+                } catch (e) {
+                    console.error('Error fitting terminal:', e);
+                }
+            }
+        });
+    },
+
+    getTerminalSize(sessionId) {
+        const terminalKeys = this.sessionTerminals[sessionId] || [];
+        const terminal = terminalKeys.length > 0 ? this.terminals[terminalKeys[0]] : null;
+        if (terminal) {
+            return {
+                rows: terminal.rows,
+                cols: terminal.cols
+            };
+        }
+        return null;
+    },
+
+    destroyTerminal(sessionId) {
+        const terminalKeys = this.sessionTerminals[sessionId] || [];
+        terminalKeys.forEach(key => {
+            this.destroyTerminalKey(key, sessionId);
+        });
+        delete this.sessionTerminals[sessionId];
+        delete this.transcripts[sessionId];
+        delete this.transcriptSizes[sessionId];
+    },
+
+    destroyTerminalKey(terminalKey, sessionId) {
+        const terminal = this.terminals[terminalKey];
+        if (terminal) {
+            terminal.dispose();
+        }
+        delete this.terminals[terminalKey];
+        delete this.fitAddons[terminalKey];
+        delete this.searchAddons[terminalKey];
+        delete this.terminalReady[terminalKey];
+        delete this.pendingOutput[terminalKey];
+
+        if (sessionId && this.sessionTerminals[sessionId]) {
+            this.sessionTerminals[sessionId] = this.sessionTerminals[sessionId].filter(key => key !== terminalKey);
+        }
+    },
+
+    clear(sessionId) {
+        const terminal = this.terminals[sessionId];
+        if (terminal) {
+            terminal.clear();
+        }
+    },
+
+    setupInputHandler(sessionId, callback) {
+        const terminalKeys = this.sessionTerminals[sessionId] || [];
+        terminalKeys.forEach(key => {
+            this.setupInputHandlerForTerminal(key, callback);
+        });
+    },
+
+    setupInputHandlerForTerminal(terminalKey, callback) {
+        const terminal = this.terminals[terminalKey];
+        if (terminal) {
+            terminal.onData(callback);
+        }
+    },
+
+    fitAllTerminals() {
+        Object.keys(this.sessionTerminals).forEach(sessionId => {
+            this.fitTerminal(sessionId);
+        });
+    },
+
+    applyThemeToTerminal(sessionId) {
+        const terminalKeys = this.sessionTerminals[sessionId] || [];
+        const theme = this.buildTheme();
+        const font = this.getMonoFont();
+        terminalKeys.forEach(key => {
+            const terminal = this.terminals[key];
+            if (!terminal) {
+                return;
+            }
+            terminal.options.theme = theme;
+            terminal.options.fontFamily = font;
+            terminal.refresh(0, terminal.rows - 1);
+        });
+    },
+
+    applyThemeToAll() {
+        requestAnimationFrame(() => {
+            Object.keys(this.sessionTerminals).forEach(sessionId => {
+                this.applyThemeToTerminal(sessionId);
+            });
+        });
+    },
+
+    findNext(sessionId, searchTerm, options = {}) {
+        const terminalKeys = this.sessionTerminals[sessionId] || [];
+        if (terminalKeys.length === 0) return false;
+
+        const searchAddon = this.searchAddons[terminalKeys[0]];
+        if (!searchAddon) return false;
+
+        return searchAddon.findNext(searchTerm, {
+            caseSensitive: options.caseSensitive || false,
+            wholeWord: options.wholeWord || false,
+            regex: options.regex || false,
+            incremental: options.incremental !== false
+        });
+    },
+
+    findPrevious(sessionId, searchTerm, options = {}) {
+        const terminalKeys = this.sessionTerminals[sessionId] || [];
+        if (terminalKeys.length === 0) return false;
+
+        const searchAddon = this.searchAddons[terminalKeys[0]];
+        if (!searchAddon) return false;
+
+        return searchAddon.findPrevious(searchTerm, {
+            caseSensitive: options.caseSensitive || false,
+            wholeWord: options.wholeWord || false,
+            regex: options.regex || false
+        });
+    },
+
+    clearSearch(sessionId) {
+        const terminalKeys = this.sessionTerminals[sessionId] || [];
+        if (terminalKeys.length === 0) return;
+
+        const searchAddon = this.searchAddons[terminalKeys[0]];
+        if (searchAddon) {
+            searchAddon.clearDecorations();
+        }
+    },
+
+    hasSearchSupport() {
+        return typeof SearchAddon !== 'undefined';
+    },
+
+    updateFontSize(newSize) {
+        Object.keys(this.terminals).forEach(key => {
+            const terminal = this.terminals[key];
+            if (terminal) {
+                terminal.options.fontSize = newSize;
+                const fitAddon = this.fitAddons[key];
+                if (fitAddon) {
+                    try {
+                        fitAddon.fit();
+                    } catch (e) {
+                        console.error('Error fitting terminal after font change:', e);
+                    }
+                }
+            }
+        });
+    },
+
+    handleOrientationChange() {
+        const newFontSize = this.getResponsiveFontSize();
+        this.updateFontSize(newFontSize);
+        setTimeout(() => {
+            this.fitAllTerminals();
+        }, 100);
+    }
+};
+
+window.TerminalManager = TerminalManager;
+
+let resizeTimeout;
+window.addEventListener('resize', () => {
+    clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(() => {
+        TerminalManager.fitAllTerminals();
+    }, 250);
+});
+
+window.addEventListener('orientationchange', () => {
+    TerminalManager.handleOrientationChange();
+});
+
+if (window.visualViewport) {
+    const initialHeight = window.visualViewport.height;
+    let keyboardVisible = false;
+
+    window.visualViewport.addEventListener('resize', () => {
+        const currentHeight = window.visualViewport.height;
+        const heightRatio = currentHeight / initialHeight;
+
+        const newKeyboardVisible = heightRatio < 0.75;
+
+        if (newKeyboardVisible !== keyboardVisible) {
+            keyboardVisible = newKeyboardVisible;
+            const notepadFocused = document.activeElement?.id === 'sessionNotepad';
+            document.body.classList.toggle('keyboard-open', keyboardVisible);
+            document.body.classList.toggle('notepad-focused', keyboardVisible && notepadFocused);
+
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(() => {
+                TerminalManager.fitAllTerminals();
+            }, 100);
+        }
+    });
+}

@@ -58,6 +58,29 @@ AI：建议执行命令 df -h（安全级别：safe）
 AI：根分区使用率85%，建议清理日志文件。
 ```
 
+## 项目结构
+
+```
+tkai-ssh/
+├── docs/                    # 架构文档（6个）
+├── webssh/                  # 主应用
+│   ├── app/
+│   │   ├── ai/              # AI模块（新增）
+│   │   │   ├── stepfun_provider.py   # 阶跃星辰API调用
+│   │   │   ├── command_generator.py  # 危险命令拦截
+│   │   │   └── routes.py             # AI API路由
+│   │   ├── auth.py          # 认证系统
+│   │   ├── audit_logger.py  # 审计日志
+│   │   ├── ssh_manager.py   # SSH连接管理
+│   │   └── ...
+│   ├── static/
+│   │   ├── css/ai-assistant.css  # AI侧边栏样式
+│   │   └── js/ai-assistant.js    # AI交互逻辑
+│   ├── templates/
+│   └── config.py            # 配置
+└── .env.example             # 环境变量示例
+```
+
 ## 安全特性
 
 - API Key通过环境变量传入，不硬编码
