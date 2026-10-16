@@ -31,3 +31,7 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+
+# Local-only backups & internal session memory (never publish)
+.local-backup/
+.workbuddy/
